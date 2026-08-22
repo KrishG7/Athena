@@ -89,11 +89,11 @@ drug) triple:
 
 | Feature group | Count | Tool | Already installed? |
 |---|---|---|---|
-| Ligand properties (logP, MW, HBD/HBA) | 18 | RDKit | ✅ |
-| Mutated amino-acid properties | 12 | RDKit | ✅ |
+| Ligand properties (logP, MW, HBD/HBA) | 18 | RDKit | |
+| Mutated amino-acid properties | 12 | RDKit | |
 | Mutation-environment / atom distribution | 21 | Biopython | pip install |
 | Protein–ligand interactions (H-bond, π-stack, salt bridge…) | 6 | PLIP | pip install |
-| Vina score + 58 scoring terms | 59 | Δ-Vina XGBoost | Vina ✅, needs xgboost |
+| Vina score + 58 scoring terms | 59 | Δ-Vina XGBoost | Vina yes, needs xgboost |
 | Pharmacophore SASA | 30 | Δ-Vina XGBoost | as above |
 
 **Our existing Vina integration is not wasted.** In this architecture the Vina

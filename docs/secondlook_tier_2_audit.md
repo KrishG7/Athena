@@ -1,6 +1,6 @@
 # SecondLook Tier 2 Engineering & Scientific Audit — Missense→Small-Molecule Binding Plausibility Signal
 
-## TL;DR
+## Summary
 - The Tier 2 claim is defensible ONLY as a narrow, explicitly-hedged computational plausibility signal ("this substitution is/isn't near, and may perturb, the modeled small-molecule binding site"), and must NOT be presented as a resistance/sensitivity prediction — because the pipeline's core assumption (rigid-receptor docking on a wild-type structure detects binding change) fails on the majority of your own nine validation cases, several of which cause resistance through *conformational-equilibrium shifts*, not local steric change at the drug contact.
 - Two traps are V1 blockers that will produce scientifically wrong output if shipped as-is: (1) covalent inhibitors (osimertinib, and the C797S case) scored by non-covalent Vina/mCSM-lig, and (2) direct UniProt→PDB residue numbering without SIFTS mapping. Both must be gated/fixed before any demo.
 - The best V1 outcome is the "fallback" your plan already contemplates: lead with AlphaMissense + binding-pocket-proximity context, and treat the Vina/mCSM-lig delta as a secondary, clearly-labeled, low-confidence signal — because no published benchmark shows AutoDock Vina score-deltas reliably predict point-mutation ΔΔG, and mCSM-lig's own ceiling is ρ≈0.67 only on crystal complexes with the drug physically bound.

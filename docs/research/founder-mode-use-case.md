@@ -23,13 +23,13 @@ This is a substantially different and *narrower* problem than "build the whole f
 
 | Founder-mode step | Covered today? | Gap |
 |---|---|---|
-| Documented evidence for a known mutation (Tier 1: CIViC/CTgov/CTRI/PubMed) | ✅ Designed, mostly built | None — this is standard-of-care-adjacent evidence lookup, already the right shape |
-| Structural plausibility signal for an undocumented *missense* mutation (Tier 2) | ✅ Built and verified | Scoped to single amino-acid substitutions only, and to *drug-binding* mechanism specifically — doesn't touch expression-driven or non-mutational targets |
-| Non-obvious target discovery from expression/pathway data (the actual FAP-discovery mechanism) | ❌ Not in scope anywhere | No expression-data ingestion path exists at all — this is the single biggest capability gap relative to the founder-mode use case |
-| Modality-agnostic option surfacing (radioligand, oncolytic virus, NK-cell, gene therapy, CAR-T — not just small-molecule drugs) | ❌ Not in scope | Tier 2's candidate generation (DGIdb/Open Targets/ChEMBL) is entirely small-molecule/drug-centric; none of these five sources index radioligand conjugates, cell therapies, or oncolytic viruses as "candidates" |
-| Expanded-access / regulatory-pathway knowledge (which modality has FDA 3926 precedent for which target class) | ❌ Not in scope, and not covered by any existing SecondLook data source | This is a genuinely novel, unstructured knowledge asset — nobody has built this as queryable data |
-| Parallel-combination compatibility reasoning (which therapies are mechanistically complementary vs. redundant vs. risky together) | ❌ Not in scope | Requires a mechanism-of-action graph, not a flat evidence list |
-| Balanced-scorecard decision support (structured, weighted, transparent) | ⚠️ Partially — `ui-flow.md`'s results screen shows evidence, but there's no explicit multi-criteria scorecard | Worth building deliberately *transparent* (see §4 below — this is exactly where RareCure's own scoring module failed methodologically, see `rarecure-build-reference.md` §4) |
+| Documented evidence for a known mutation (Tier 1: CIViC/CTgov/CTRI/PubMed) | Designed, mostly built | None — this is standard-of-care-adjacent evidence lookup, already the right shape |
+| Structural plausibility signal for an undocumented *missense* mutation (Tier 2) | Built and verified | Scoped to single amino-acid substitutions only, and to *drug-binding* mechanism specifically — doesn't touch expression-driven or non-mutational targets |
+| Non-obvious target discovery from expression/pathway data (the actual FAP-discovery mechanism) | Not in scope anywhere | No expression-data ingestion path exists at all — this is the single biggest capability gap relative to the founder-mode use case |
+| Modality-agnostic option surfacing (radioligand, oncolytic virus, NK-cell, gene therapy, CAR-T — not just small-molecule drugs) | Not in scope | Tier 2's candidate generation (DGIdb/Open Targets/ChEMBL) is entirely small-molecule/drug-centric; none of these five sources index radioligand conjugates, cell therapies, or oncolytic viruses as "candidates" |
+| Expanded-access / regulatory-pathway knowledge (which modality has FDA 3926 precedent for which target class) | Not in scope, and not covered by any existing SecondLook data source | This is a genuinely novel, unstructured knowledge asset — nobody has built this as queryable data |
+| Parallel-combination compatibility reasoning (which therapies are mechanistically complementary vs. redundant vs. risky together) | Not in scope | Requires a mechanism-of-action graph, not a flat evidence list |
+| Balanced-scorecard decision support (structured, weighted, transparent) | Partially — `ui-flow.md`'s results screen shows evidence, but there's no explicit multi-criteria scorecard | Worth building deliberately *transparent* (see §4 below — this is exactly where RareCure's own scoring module failed methodologically, see `rarecure-build-reference.md` §4) |
 
 ## 2. Why FalkorDB / hybrid semantic+Cypher is the right shape for this
 

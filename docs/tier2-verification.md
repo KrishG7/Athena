@@ -6,19 +6,19 @@ Live-tested every source in `data-sources.md`'s Tier 2 table on 2026-08-20. This
 
 | Source | Status | Notes |
 |---|---|---|
-| UniProt REST | ✅ Pass | Exactly as documented |
-| hgvs (PyPI) / Mutalyzer | ✅ Pass | Both live |
-| **AlphaMissense** | ✅ Pass — **architecture change** | Use Ensembl VEP REST, not dbNSFP file/hosted lookup — see below |
-| RCSB PDB | ✅ Pass | |
-| AlphaFold DB | ✅ Pass | pLDDT returned directly as `globalMetricValue` |
-| ESM Atlas fold API | ✅ Pass (today) | Docs' "unreliable, don't demo-path" caution stands — historical outages, not scriptable-safety |
-| DGIdb | ✅ Pass — **note** | It's GraphQL, not plain REST — endpoint is `POST https://dgidb.org/api/graphql` |
-| Open Targets | ✅ Pass | GraphQL, `https://api.platform.opentargets.org/api/v4/graphql` |
-| ChEMBL | ✅ Pass | |
-| PubChem PUG REST | ✅ Pass | |
-| **mCSM-lig** | ⚠️ Confirmed risk | Plain HTML form, single mutation/ligand per submission, no API, no batch mode — see below |
-| AutoDock Vina / smina | ✅ Pass (install-time) | `pip install vina` (1.2.7) + `meeko` (0.7.1) for ligand/receptor prep both resolve |
-| BindingDB REST | ⚠️ Flaky | `getLigandsByPDBs` fast (1.2s); `getLigandsByUniprot` hung >25s with no response. Matches its "reference/validation only" categorization — don't build a live dependency on it |
+| UniProt REST | Pass | Exactly as documented |
+| hgvs (PyPI) / Mutalyzer | Pass | Both live |
+| **AlphaMissense** | Pass — **architecture change** | Use Ensembl VEP REST, not dbNSFP file/hosted lookup — see below |
+| RCSB PDB | Pass | |
+| AlphaFold DB | Pass | pLDDT returned directly as `globalMetricValue` |
+| ESM Atlas fold API | Pass (today) | Docs' "unreliable, don't demo-path" caution stands — historical outages, not scriptable-safety |
+| DGIdb | Pass — **note** | It's GraphQL, not plain REST — endpoint is `POST https://dgidb.org/api/graphql` |
+| Open Targets | Pass | GraphQL, `https://api.platform.opentargets.org/api/v4/graphql` |
+| ChEMBL | Pass | |
+| PubChem PUG REST | Pass | |
+| **mCSM-lig** | Confirmed risk | Plain HTML form, single mutation/ligand per submission, no API, no batch mode — see below |
+| AutoDock Vina / smina | Pass (install-time) | `pip install vina` (1.2.7) + `meeko` (0.7.1) for ligand/receptor prep both resolve |
+| BindingDB REST | Flaky | `getLigandsByPDBs` fast (1.2s); `getLigandsByUniprot` hung >25s with no response. Matches its "reference/validation only" categorization — don't build a live dependency on it |
 
 ## Detail: AlphaMissense — architecture change
 
@@ -54,14 +54,14 @@ Inspected the live form at `https://biosig.lab.uq.edu.au/mcsm_lig/prediction`:
   Distance to ligand: 2.814 Å
   DUET stability change: -0.087 Kcal/mol
   ```
-- The submission form's real fields (read from the live DOM, not guessed): `wild` (file upload), `pdb_code` (text, alternative to file), `mutation` (text, e.g. `D30N`), `chain` (text), `lig_id` (text, ligand 3-letter code), `affin_wt` (text, optional — purpose unconfirmed, leave blank unless Cursor's testing shows it's required), submit button `name="run" value="single"`. The static `<form action=...>` attribute reads `run_example` with `method="get"`, but that's the default state before JS rewrites it on submit — the actual POST target must be discovered by driving the real page (see Prompt E), not by replaying a guessed URL.
+- The submission form's real fields (read from the live DOM, not guessed): `wild` (file upload), `pdb_code` (text, alternative to file), `mutation` (text, e.g. `D30N`), `chain` (text), `lig_id` (text, ligand 3-letter code), `affin_wt` (text, optional — purpose unconfirmed, leave blank unless testing shows it is required), submit button `name="run" value="single"`. The static `<form action=...>` attribute reads `run_example` with `method="get"`, but that's the default state before JS rewrites it on submit — the actual POST target must be discovered by driving the real page (see Prompt E), not by replaying a guessed URL.
 - No documented rate limit still stands, so automation must stay conservative and serial: one submission at a time, a real delay between calls (not concurrent/bulk), and a generous timeout with a clean fallback rather than a hang. This is a shared academic server, not a rate-limited public API — scripted politeness here isn't optional.
 
 Given the synchronous, cleanly-parseable response, the most robust automation approach is a **headless browser (Playwright)** filling the actual HTML form and reading the rendered result page — not replaying a hand-built HTTP POST — since JS owns the real submit behavior and a raw POST could silently break on any front-end change. This also means the automated path degrades the same way a human user's would if the site changes, rather than failing in some confusing lower-level way.
 
 AutoDock Vina/smina (confirmed installable) stays as the fallback for anything mCSM-lig itself can't handle (timeout, form rejects the input, no ligand-bound structure available) — see Prompt E.
 
-## Cursor prompts — ready to build now
+## Implementation steps — ready to build now
 
 These four are unblocked by the verification above and can be built independently, each testable in isolation before chaining (per `tech-stack-setup.md` step 6).
 
@@ -214,6 +214,6 @@ This is real, multi-step structural work — do not approximate or skip a step s
 This is very likely the largest single unit of work in the Tier 2 pipeline so far — structure prep is explicitly called out as "the hard part" in tech-stack-setup.md. If any single step here (especially step 2, mutant side-chain placement) turns out too large to finish well in one pass, stop and tell me which part, rather than shipping a version that silently produces plausible-looking but methodologically unsound docking scores — that's a worse outcome than "docking unavailable, AlphaMissense + structural context only."
 ```
 
-## Not yet ready for a Cursor prompt
+## Not yet ready to implement
 
-- **CTRI (Tier 1)** — not verified in this pass (out of scope for "Tier 2" per this session), still flagged unconfirmed in `data-sources.md`.
+- **CTRI (Tier 1)** — not verified in this pass (out of scope for Tier 2), still flagged unconfirmed in `data-sources.md`.

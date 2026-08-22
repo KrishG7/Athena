@@ -1,6 +1,6 @@
 # Tier 2 Maximum-Potential Roadmap: Computational Structural Drug-Response Plausibility Signal
 
-## TL;DR
+## Summary
 - **Tier 2 can be substantially improved, but its ceiling is fixed by physics and data, not engineering.** The single highest-value upgrade is replacing the arbitrary ΔΔ-affinity threshold with a *data-driven calibration model* trained on the MdrDB / Platinum / TKI resistance datasets that maps predicted ΔΔG to an empirical probability of biochemical resistance, wrapped in conformal prediction for honest confidence intervals. Every other upgrade is secondary to fixing this.
 - **The best realistic accuracy for the core task (ΔΔ binding-affinity on a missense mutation) is roughly Pearson R≈0.75 / RMSE≈1.0 kcal/mol on data resembling the training set, degrading to R≈0.24–0.49 on independent targets** — meaning Tier 2 will always be a hypothesis-generator, never a predictor. Kinase conformational-state selection (DFG-in/out) is the single largest silent error source and must be handled explicitly.
 - **Whole categories remain genuine open problems: fusion oncoproteins, compound mutations in cis/trans, bypass-pathway (non-binding) resistance, and any link to actual patient outcomes rather than biochemical IC50.** These should be flagged in-product as "out of computational scope," not papered over.

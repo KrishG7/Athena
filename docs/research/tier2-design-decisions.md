@@ -1,6 +1,6 @@
 # Tier 2 Design Decision Document: Structural Drug-Response Prediction for Undocumented Cancer Mutations (RareCure Extension)
 
-## TL;DR
+## Summary
 
 - **The originally proposed Tier 2 pipeline (ESMFold structure change + DeepPurpose binding affinity to judge a point mutation) is NOT scientifically defensible and must be re-architected** — sequence-based DTI models like DeepPurpose largely memorize protein identity and are effectively blind to single amino-acid changes, and ESMFold/AlphaFold typically return a near-identical fold for a point mutation. Building on these would produce confident-looking noise.
 - **The defensible redesign** keeps the same UX but swaps the engine: AlphaMissense precomputed-score lookup as a functional pre-filter, plus a mutation-specific protein–ligand ΔΔ-affinity predictor — chiefly **mCSM-lig**, which was built for exactly this question and trained on the Platinum database (correlation up to ρ = 0.67 with experiment) — reporting a mutant-vs-wildtype **delta**, never an absolute response prediction.
@@ -81,7 +81,7 @@
 
 | Tool | Predicts | Access | Notes |
 |---|---|---|---|
-| **mCSM-lig** ⭐ | ΔΔ protein–small-molecule affinity upon single missense mutation | Web server (biosig.lab.uq.edu.au/mcsm_lig; structure.bioc.cam.ac.uk/mcsm_lig) | Trained on **Platinum**; graph-based signatures; **needs a protein–ligand complex structure**; ρ up to 0.67 |
+| **mCSM-lig** | ΔΔ protein–small-molecule affinity upon single missense mutation | Web server (biosig.lab.uq.edu.au/mcsm_lig; structure.bioc.cam.ac.uk/mcsm_lig) | Trained on **Platinum**; graph-based signatures; **needs a protein–ligand complex structure**; ρ up to 0.67 |
 | **FoldX** | Protein **stability** ΔΔG (not ligand-specific) | Academic license, downloadable | |ΔΔG|>1 kcal/mol ≈ destabilizing; weak on stabilizing mutations |
 | **Rosetta ddG (cartesian/flex ddG)** | Stability / interface ΔΔG | Free academic, heavy | ~5–7 days to first successful run for non-experts — **avoid for hackathon** |
 | **DDGun / DDGun3D** | Stability ΔΔG | Free, web + local | Fast simple baseline |
@@ -184,7 +184,7 @@
 | **RCSB PDB / AlphaFold DB** | Target structure | REST/download | Free | <1 s | May lack drug-bound complex |
 | **DGIdb / Open Targets / ChEMBL** | Candidate drug generation | API | Free | seconds | Coverage gaps |
 | **PubChem PUG REST** | Drug SMILES | REST | Free | <1 s (≤5/s, ≤400/min) | Naming/SMILES field changes |
-| **mCSM-lig** ⭐ | Mutation → protein–ligand ΔΔ affinity | Web server | Free | sec–min | Needs complex structure; ρ≈0.67 ceiling |
+| **mCSM-lig** | Mutation → protein–ligand ΔΔ affinity | Web server | Free | sec–min | Needs complex structure; ρ≈0.67 ceiling |
 | **AutoDock Vina / smina** | WT-vs-mutant docking (complement/stretch) | Local, open | Free | sec–min | Structure prep is the hard part |
 | **FoldX / DDGun** | Stability ΔΔG cross-check | License / free | Free/academic | sec–min | Stability ≠ binding |
 

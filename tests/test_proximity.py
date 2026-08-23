@@ -143,3 +143,79 @@ def test_two_different_drugs_on_one_structure_share_the_pocket_measurement():
     assert a.distance_angstrom == b.distance_angstrom
     assert a.description == b.description
     assert not a.ligand_is_candidate_drug and not b.ligand_is_candidate_drug
+
+
+# --- Multi-protomer structures ------------------------------------------------
+# Found by independent verification (validation/verify_proximity.py) against the
+# criteria pre-registered in docs/proximity-validation-plan.md. BRAF 8C7X holds
+# two copies of the protein whose residue-600-to-ligand distances differ by 5 A
+# and fall in different bands, so whichever chain the docking selector happened
+# to return silently became the reported answer.
+
+from secondlook.proximity import build_proximity_signal
+
+
+def _signal(protomers, ligand="TXV"):
+    return build_proximity_signal(
+        None,
+        structure_id="8C7X",
+        structure_source="PDB",
+        measured_to_ligand=ligand,
+        protomer_distances=protomers,
+    )
+
+
+def test_reported_distance_is_the_closest_approach_across_protomers():
+    """The question is "could a substitution here reach the pocket?", so the
+    conservative answer is yes-if-any-copy-shows-it."""
+    sig = _signal({"A": 12.2452, "B": 7.2077})
+    assert sig.distance_angstrom == 7.2077
+    assert sig.band == "pocket_adjacent"
+
+
+def test_protomer_distances_are_preserved_not_collapsed():
+    """Reporting only the minimum would hide the disagreement entirely."""
+    sig = _signal({"A": 12.2452, "B": 7.2077})
+    assert sig.protomer_distances == {"A": 12.2452, "B": 7.2077}
+    assert sig.distance_range_angstrom == (7.2077, 12.2452)
+
+
+def test_disagreement_is_defined_by_band_not_by_a_numeric_threshold():
+    """The band is what changes what gets reported, so it is what "disagree"
+    has to mean. Two protomers 3 A apart inside one band are not a disagreement;
+    two 1 A apart across a boundary are."""
+    assert _signal({"A": 12.2452, "B": 7.2077}).protomers_disagree is True
+    assert _signal({"A": 16.6387, "B": 16.9}).protomers_disagree is False
+    assert _signal({"A": 4.9, "B": 5.2}).protomers_disagree is True
+
+
+def test_a_single_protomer_never_reports_disagreement():
+    assert _signal({"A": 3.5}).protomers_disagree is False
+    assert _signal({}).protomers_disagree is False
+
+
+def test_description_discloses_disagreeing_protomers_with_their_chains():
+    text = _signal({"A": 12.2452, "B": 7.2077}).description
+    assert "2 copies" in text
+    assert "chain A 12.2 A" in text and "chain B 7.2 A" in text
+    assert "most permissive reading" in text
+
+
+def test_description_stays_quiet_when_protomers_agree():
+    """Disclosure that fires on every multimer is noise, and noise gets ignored
+    exactly when it finally matters."""
+    text = _signal({"A": 16.6387, "B": 16.9}).description
+    assert "copies of the protein" not in text
+
+
+def test_protomer_measurements_win_over_a_passed_in_single_distance():
+    """A single scalar cannot represent a multimer; if per-chain values exist
+    they are the measurement."""
+    sig = build_proximity_signal(
+        12.2452,
+        structure_id="8C7X",
+        structure_source="PDB",
+        measured_to_ligand="TXV",
+        protomer_distances={"A": 12.2452, "B": 7.2077},
+    )
+    assert sig.distance_angstrom == 7.2077

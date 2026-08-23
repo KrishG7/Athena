@@ -299,9 +299,14 @@ def test_binding_failure_uses_the_binding_message_not_the_plddt_one():
                vina_client=FailingVina())
     assert out.results == []
     assert len(out.failures) == 1
-    assert out.failures[0].reason == BINDING_UNAVAILABLE_MESSAGE
-    # The structure itself was fine; only binding scoring came up empty.
+    # The structure itself was fine; only binding scoring came up empty. That is
+    # the property under test -- not the exact wording, which is now specific to
+    # the failure kind (here a bare VinaError -> "docking failed to produce a
+    # score") rather than one generic sentence for all six.
     assert "pLDDT" not in out.failures[0].reason
+    assert "reliab" not in out.failures[0].reason.lower()
+    assert "AlphaMissense functional score" in out.failures[0].reason
+    assert "docking failed" in out.failures[0].reason
 
 
 def test_failure_object_matches_the_api_contract():
@@ -790,3 +795,118 @@ def test_transient_binding_failure_stays_retryable():
     out = _run(pdb_client=FakePdbApo(), mcsm_client=FailingMcsm(),
                vina_client=FailingVina())
     assert out.failures[0].retryable is True
+
+
+# --- A declined delta must say why -------------------------------------------
+# A proximity_only result carrying no reason is unexplainable: the reader cannot
+# tell a covalent-mechanism refusal from a receptor-prep failure from a mutation
+# sitting outside the pocket. All three are legitimate declines meaning very
+# different things.
+
+from secondlook.pipeline import NO_DELTA_UNEXPLAINED  # noqa: E402
+
+
+def _declined(**binding_overrides):
+    """Assemble one result whose binding step declined, reusing the fixtures a
+    successful run produces so only the binding differs."""
+    from secondlook.pipeline import _assemble_candidate, measure_proximity
+
+    out = _run()
+    good = out.results[0]
+    binding = BindingScore(
+        status="unavailable",
+        method=None,
+        delta_score=None,
+        affinity_class=None,
+        distance_angstrom=3.5,
+        ligand_id="KY9",
+        chain="A",
+        **binding_overrides,
+    )
+    item, _signal, _failure = _assemble_candidate(
+        validation=out.validation,
+        alphamissense=out.alphamissense,
+        structure=_STRUCTURE_FOR_ASSEMBLY,
+        candidate=_CANDIDATE_FOR_ASSEMBLY,
+        binding=binding,
+        calibrations=None,
+        computed_at=out.computed_at,
+        proximity=_PROXIMITY_FOR_ASSEMBLY,
+    )
+    return item, good
+
+
+def test_a_declined_delta_carries_the_binding_step_reason():
+    item, _ = _declined(
+        error_message="Osimertinib binds EGFR Cys797 covalently; a non-covalent "
+        "scoring function cannot model this mechanism.",
+        reason_code="mechanism_invalidated",
+    )
+    assert item is not None
+    assert item.signal_type == "proximity_only"
+    assert "covalently" in item.no_delta_reason
+    assert item.no_delta_reason_code == "mechanism_invalidated"
+
+
+def test_a_declined_delta_with_no_message_is_flagged_as_a_reporting_gap():
+    """Every decline path is supposed to set a message. This string appearing in
+    output is a bug report about the pipeline, not a fact about the case."""
+    item, _ = _declined(error_message=None, reason_code=None)
+    assert item is not None
+    assert item.no_delta_reason == NO_DELTA_UNEXPLAINED
+    assert item.no_delta_reason_code is None
+
+
+def test_a_scored_result_carries_no_decline_reason():
+    """A reason on a scored result would be contradictory — it did not decline."""
+    item = _run().results[0]
+    assert item.signal_type == "binding_delta"
+    assert item.no_delta_reason is None
+    assert item.no_delta_reason_code is None
+
+
+# Minimal fixtures for calling _assemble_candidate directly. Built once here
+# rather than inside each test so the tests read as "only the binding differs".
+from secondlook.candidates import DrugCandidate  # noqa: E402
+from secondlook.proximity import build_proximity_signal  # noqa: E402
+from secondlook.structure import StructureResult  # noqa: E402
+
+_STRUCTURE_FOR_ASSEMBLY = StructureResult(
+    status="found", source="PDB", id="8A27", pdb_text=None, annotated_position=790,
+    ligand_bound=True, reliability_flag="high", plddt_at_residue=None,
+    plddt_global=None, error_message=None,
+)
+_CANDIDATE_FOR_ASSEMBLY = DrugCandidate(
+    name="GEFITINIB", smiles="CO", smiles_source="PubChem", approved=True,
+    source="DGIdb", target_tier=1,
+)
+_PROXIMITY_FOR_ASSEMBLY = build_proximity_signal(
+    3.5216, structure_id="8A27", structure_source="PDB", measured_to_ligand="KY9",
+)
+
+
+def test_scored_by_method_never_produces_a_none_key():
+    """Regression for the crash that killed the gold-standard runner.
+
+    `cache.save_payload` serialises with `sort_keys=True`. A None key alongside a
+    string key makes `sorted()` raise TypeError, so a payload holding one scored
+    and one unscored result could not be written at all. EGFR T790M is the only
+    gold-standard case with two drugs, and it hit exactly that combination.
+    """
+    import json
+    from types import SimpleNamespace
+
+    from secondlook.pipeline import Tier2Output
+
+    # scored_by_method reads only `.method`, so a stub is enough and keeps the
+    # test pinned to the property rather than to Tier2ResultItem's full shape.
+    out = Tier2Output(
+        status="complete",
+        results=[SimpleNamespace(method="docking"), SimpleNamespace(method=None)],
+    )
+
+    counts = out.scored_by_method
+    assert all(isinstance(k, str) for k in counts), counts
+    assert counts == {"docking": 1, "null": 1}
+    # The actual failure mode: this call used to raise.
+    json.dumps({"scored_by_method": counts}, sort_keys=True)

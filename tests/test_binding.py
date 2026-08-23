@@ -462,3 +462,53 @@ def test_live_mcsm_lig_example_d30n_2z4o():
     assert result.distance_angstrom == pytest.approx(2.814, abs=0.001)
     assert result.ligand_id == "065"
     assert result.position == 30
+
+
+# --- Component scores travel with the delta -----------------------------------
+# A delta alone is uncheckable. -9.8 vs -8.0 and -2.1 vs -0.3 both give +1.8,
+# but the first is two good poses differing meaningfully and the second is two
+# failed dockings whose difference means nothing. Keeping only the difference
+# made an implausible coincidence between two unrelated cases unexaminable.
+
+from secondlook.binding import BindingScore  # noqa: E402
+
+
+def test_a_docking_score_carries_the_two_values_it_was_computed_from():
+    s = BindingScore(
+        status="scored", method="docking", delta_score=1.763, affinity_class=None,
+        distance_angstrom=3.48, ligand_id="66K", chain="A",
+        wildtype_score=-10.263, mutant_score=-8.5,
+    )
+    assert s.wildtype_score == -10.263
+    assert s.mutant_score == -8.5
+    assert s.delta_score == pytest.approx(s.mutant_score - s.wildtype_score)
+
+
+def test_component_scores_default_to_none_for_methods_without_them():
+    """mCSM-lig returns a delta directly; there are no components to report, and
+    inventing them would be worse than their absence."""
+    s = BindingScore(
+        status="scored", method="mCSM-lig", delta_score=-0.61, affinity_class=None,
+        distance_angstrom=3.48, ligand_id="66K", chain="A",
+    )
+    assert s.wildtype_score is None
+    assert s.mutant_score is None
+
+
+def test_component_scores_expose_a_delta_built_from_two_failed_dockings():
+    """The case this field exists to make visible: a respectable-looking delta
+    whose components are both far too weak to mean anything."""
+    plausible = BindingScore(
+        status="scored", method="docking", delta_score=1.8, affinity_class=None,
+        distance_angstrom=3.5, ligand_id="X", chain="A",
+        wildtype_score=-9.8, mutant_score=-8.0,
+    )
+    suspect = BindingScore(
+        status="scored", method="docking", delta_score=1.8, affinity_class=None,
+        distance_angstrom=3.5, ligand_id="X", chain="A",
+        wildtype_score=-2.1, mutant_score=-0.3,
+    )
+    assert plausible.delta_score == suspect.delta_score
+    # Identical deltas, and only the components separate them.
+    assert plausible.wildtype_score < -8.0
+    assert suspect.wildtype_score > -3.0

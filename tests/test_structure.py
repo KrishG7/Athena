@@ -432,3 +432,69 @@ def test_a_found_pdb_structure_always_contains_the_mutated_residue():
         )
         if result.source == "PDB":
             assert covers_residue(result.pdb_text, 175)
+
+
+# --- SIFTS-resolved residue numbering ----------------------------------------
+# The pipeline numbers residues by UniProt position but indexes into PDB files,
+# which number them however the depositor chose. Where the two differ, the old
+# behaviour measured a real residue at the wrong position and reported a
+# confident distance for it.
+
+from secondlook.structure import resolve_author_residue_number  # noqa: E402
+from secondlook.sifts import ResidueMapping, SiftsLookupError  # noqa: E402
+
+
+class _Mapper:
+    def __init__(self, result=None, raises=False):
+        self._result, self._raises = result, raises
+
+    def map_position(self, pdb_id, accession, position, chain_id=None):
+        if self._raises:
+            raise SiftsLookupError("SIFTS unreachable")
+        return self._result
+
+
+def _mapping(author):
+    return ResidueMapping(
+        pdb_id="5HU9", uniprot_accession="P00519", chain_id="A",
+        author_residue_number=author, uniprot_position=315,
+    )
+
+
+def test_sifts_numbering_is_applied_when_it_differs():
+    """The whole point. Measuring at 315 here would hit a real residue that is
+    not the mutated one."""
+    n, why = resolve_author_residue_number("5hu9", "P00519", 315, _Mapper(_mapping(115)))
+    assert (n, why) == (115, "sifts")
+
+
+def test_sifts_agreement_is_recorded_as_confirmed_not_assumed():
+    n, why = resolve_author_residue_number("5hu9", "P00519", 315, _Mapper(_mapping(315)))
+    assert (n, why) == (315, "sifts")
+
+
+def test_no_sifts_numbering_falls_back_but_says_so():
+    """EGFR 8A27 and ALK 4Z55 supply no author numbering. The fallback is the
+    old behaviour; labelling it is the new part."""
+    n, why = resolve_author_residue_number("8a27", "P00533", 790, _Mapper(None))
+    assert (n, why) == (790, "assumed")
+
+
+def test_a_sifts_outage_is_distinguished_from_a_missing_mapping():
+    """Both fall back to the UniProt number, but "the service was down" and
+    "this entry has no mapping" mean different things when reading a stored
+    result months later."""
+    n, why = resolve_author_residue_number("5hu9", "P00519", 315, _Mapper(raises=True))
+    assert (n, why) == (315, "unavailable")
+
+
+def test_no_accession_means_nothing_to_map_against():
+    n, why = resolve_author_residue_number("5hu9", None, 315, _Mapper(_mapping(115)))
+    assert (n, why) == (315, "assumed")
+
+
+def test_a_sifts_outage_never_refuses_the_structure():
+    """A mapping service being down is not a reason to reject a structure whose
+    numbering has been correct in every case checked."""
+    n, _ = resolve_author_residue_number("5hu9", "P00519", 315, _Mapper(raises=True))
+    assert n == 315

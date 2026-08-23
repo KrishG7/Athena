@@ -92,6 +92,46 @@ def covers_residue(pdb_text: str, residue_number: int) -> bool:
     return False
 
 
+def resolve_author_residue_number(
+    pdb_id: str,
+    uniprot_accession: str | None,
+    uniprot_position: int,
+    mapper: "object | None" = None,
+) -> tuple[int, str]:
+    """Translate a UniProt position into the residue number this PDB entry uses.
+
+    Returns `(residue_number, provenance)` where provenance is one of:
+
+    - ``"sifts"``        — SIFTS supplied the number; it may differ from the
+                           UniProt position and the difference has been applied.
+    - ``"assumed"``      — SIFTS had no numbering for this entry, so the UniProt
+                           position is used unchanged. This is the pipeline's
+                           long-standing behaviour, now labelled rather than
+                           silent.
+    - ``"unavailable"``  — SIFTS could not be reached. Same fallback, different
+                           reason, and the distinction matters when reading a
+                           result later.
+
+    Never raises on a SIFTS failure. A mapping service being down is not a
+    reason to refuse a structure whose numbering has been right in every case
+    checked so far — but it *is* a reason to record that the number was assumed
+    rather than confirmed.
+    """
+    if not uniprot_accession:
+        return uniprot_position, "assumed"
+
+    from secondlook.sifts import SiftsLookupError, SiftsMapper
+
+    mapper = mapper or SiftsMapper()
+    try:
+        mapping = mapper.map_position(pdb_id, uniprot_accession, uniprot_position)
+    except SiftsLookupError:
+        return uniprot_position, "unavailable"
+    if mapping is None:
+        return uniprot_position, "assumed"
+    return mapping.author_residue_number, "sifts"
+
+
 def residue_b_factor_from_pdb(pdb_text: str, residue_number: int) -> float | None:
     for line in pdb_text.splitlines():
         if not line.startswith("ATOM"):

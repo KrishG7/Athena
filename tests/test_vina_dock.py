@@ -306,7 +306,62 @@ def test_score_binding_maps_vina_errors_to_binding_unavailable_message():
         sleeper=lambda _: None,
     )
     assert result.status == "unavailable"
-    assert result.error_message == BINDING_UNAVAILABLE_MESSAGE
+    # A receptor-prep failure must say so. It used to collapse into the generic
+    # "mCSM-lig and docking were both unavailable or inapplicable", which reads
+    # as a statement about the molecule rather than a structure-handling bug.
+    assert result.reason_code == "receptor_prep_failed"
+    assert "receptor structure could not be prepared" in result.error_message
+    assert "bad atoms" in result.error_message, "the underlying cause must survive"
+    assert result.error_message != BINDING_UNAVAILABLE_MESSAGE
+
+
+def test_docking_timeout_is_reported_as_a_limit_not_a_refusal():
+    """A timeout is a setting, not a property of the chemistry.
+
+    This is the failure that made 7 of 9 gold-standard cases look like docking
+    had refused them, when the calculation was simply cut off. See ISSUES.md #17.
+    """
+    from secondlook.binding import score_binding
+    from secondlook.candidates import DrugCandidate
+    from secondlook.mutation_validation import MutationValidationResult
+    from secondlook.structure import StructureResult
+    from secondlook.vina_dock import VinaTimeoutError
+
+    validation = MutationValidationResult(
+        status="valid", gene="TEST", hgvs_normalized="p.Asp30Asn",
+        uniprot_accession="P00000", isoform_note="canonical", position=30,
+        reference_residue_expected="D", reference_residue_actual="D",
+        mutation_type="missense", error_message=None,
+        wildtype_sequence="D" + "A" * 40, mutant_sequence="N" + "A" * 40,
+    )
+    structure = StructureResult(
+        status="found", source="PDB", id="2Z4O", plddt_at_residue=90.0,
+        plddt_global=90.0, reliability_flag="high", ligand_bound=True,
+        annotated_position=30, pdb_text=LIGAND_PDB,
+    )
+    candidate = DrugCandidate(
+        name="EXAMPLE", source="DGIdb", target_tier="exact_protein",
+        approved=True, smiles="CCO", smiles_source="PubChem",
+    )
+
+    class TimingOutVina:
+        timeout_seconds = 900.0
+
+        def score(self, **kwargs) -> BindingScore:
+            raise VinaTimeoutError("Vina docking exceeded 900.0s")
+
+    result = score_binding(
+        validation, structure, candidate,
+        mcsm_client=type("M", (), {"submit": staticmethod(
+            lambda **k: (_ for _ in ()).throw(Exception("unused")))})(),
+        vina_client=TimingOutVina(),
+        het_resolver=type("H", (), {"resolve": staticmethod(lambda *a: None)})(),
+        sleeper=lambda _: None,
+    )
+    assert result.status == "unavailable"
+    assert result.reason_code == "docking_timeout"
+    assert "900s limit" in result.error_message
+    assert "NOT a statement about the molecule" in result.error_message
 
 
 @pytest.mark.integration
@@ -688,3 +743,295 @@ def test_contact_threshold_admits_direct_contact_distances():
 
 def test_resolve_overvalence_is_a_noop_on_clean_structures():
     assert resolve_overvalence(PEPTIDE_PDB).count("ATOM") == PEPTIDE_PDB.count("ATOM")
+
+
+# --- Receptor preparer fallback ----------------------------------------------
+# meeko's residue templates reject PDBFixer-built mutant side chains
+# ("Updated 1 H positions but deleted 4"), which blocked ABL1 T315I (5HU9) and
+# both ALK cases (4Z55) — three of the nine gold-standard cases. Open Babel does
+# not use residue templates and prepares them.
+
+from secondlook.vina_dock import (  # noqa: E402
+    FallbackReceptorPreparer,
+    OpenBabelReceptorPreparer,
+    prepare_receptor_pair,
+)
+
+
+class _Preparer:
+    """Records what it was asked to prepare; optionally refuses some inputs."""
+
+    def __init__(self, name, refuse_containing=None):
+        self.name = name
+        self.calls = []
+        self._refuse = refuse_containing
+
+    def to_pdbqt(self, pdb_text):
+        self.calls.append(pdb_text)
+        if self._refuse and self._refuse in pdb_text:
+            raise ReceptorPrepError(f"{self.name} refuses this structure")
+        return f"{self.name}:{pdb_text}"
+
+
+def test_fallback_is_not_used_when_the_primary_succeeds():
+    """meeko's atom typing is the reference Vina was parameterised against, so
+    it must win wherever it works."""
+    primary, fallback = _Preparer("meeko"), _Preparer("obabel")
+    prep = FallbackReceptorPreparer(primary, fallback)
+    assert prep.to_pdbqt("good") == "meeko:good"
+    assert prep.used_fallback is False
+    assert fallback.calls == []
+
+
+def test_fallback_is_used_when_the_primary_refuses():
+    primary, fallback = _Preparer("meeko", refuse_containing="MUT"), _Preparer("obabel")
+    prep = FallbackReceptorPreparer(primary, fallback)
+    assert prep.to_pdbqt("MUT") == "obabel:MUT"
+    assert prep.used_fallback is True
+
+
+def test_both_failing_reports_both_reasons():
+    """Hiding the primary's message behind the fallback's would lose the actual
+    diagnosis — the primary is the one whose failure mode is understood."""
+    primary = _Preparer("meeko", refuse_containing="BAD")
+    fallback = _Preparer("obabel", refuse_containing="BAD")
+    with pytest.raises(ReceptorPrepError) as exc:
+        FallbackReceptorPreparer(primary, fallback).to_pdbqt("BAD")
+    assert "meeko refuses" in str(exc.value)
+    assert "obabel refuses" in str(exc.value)
+
+
+# --- The pair must travel the same path --------------------------------------
+
+
+def test_a_mutant_needing_fallback_drags_the_wildtype_with_it():
+    """This is the whole point. meeko and Open Babel assign different AutoDock
+    types and different partial charges. A wild-type typed by one and a mutant
+    typed by the other yields a delta contaminated by the preparer difference —
+    and that contamination is the same order as the 0.02-0.56 kcal/mol signal
+    being measured."""
+    primary = _Preparer("meeko", refuse_containing="MUT")
+    fallback = _Preparer("obabel")
+    wt, mt = prepare_receptor_pair(FallbackReceptorPreparer(primary, fallback), "WT", "MUT")
+    assert wt == "obabel:WT"
+    assert mt == "obabel:MUT"
+    assert primary.calls == ["MUT"], "wild-type must not be prepared by the primary"
+
+
+def test_both_use_the_primary_when_neither_needs_the_fallback():
+    primary, fallback = _Preparer("meeko"), _Preparer("obabel")
+    wt, mt = prepare_receptor_pair(FallbackReceptorPreparer(primary, fallback), "WT", "MUT")
+    assert (wt, mt) == ("meeko:WT", "meeko:MUT")
+    assert fallback.calls == []
+
+
+def test_the_mutant_is_attempted_first():
+    """The mutant is the one that fails, so trying it first decides the path
+    before any work is spent on a wild-type that may have to be redone."""
+    primary, fallback = _Preparer("meeko"), _Preparer("obabel")
+    prepare_receptor_pair(FallbackReceptorPreparer(primary, fallback), "WT", "MUT")
+    assert primary.calls[0] == "MUT"
+
+
+def test_a_wildtype_only_failure_also_forces_the_pair_onto_the_fallback():
+    primary = _Preparer("meeko", refuse_containing="WT")
+    fallback = _Preparer("obabel")
+    wt, mt = prepare_receptor_pair(FallbackReceptorPreparer(primary, fallback), "WT", "MUT")
+    assert wt == "obabel:WT" and mt == "obabel:MUT"
+
+
+def test_an_explicitly_injected_preparer_is_used_as_given():
+    """A caller who supplies a preparer means it; this is not the place to
+    second-guess an explicit injection."""
+    p = _Preparer("custom")
+    wt, mt = prepare_receptor_pair(p, "WT", "MUT")
+    assert (wt, mt) == ("custom:WT", "custom:MUT")
+
+
+def test_open_babel_receptor_strips_heteroatoms():
+    """The ligand is docked separately. Leaving the crystallised copy in the
+    receptor docks into an already-occupied pocket — wrong answer, no error."""
+    pdb = (
+        "ATOM      1  N   THR A 315      10.000  10.000  10.000  1.00 20.00           N\n"
+        "HETATM 5000  C1  66K A 601      12.000  12.000  12.000  1.00 20.00           C\n"
+        "HETATM 5001  O   HOH A 700      14.000  14.000  14.000  1.00 20.00           O\n"
+    )
+    out = OpenBabelReceptorPreparer._protein_only(pdb, OpenBabelReceptorPreparer._DISCARD_HET)
+    assert "THR" in out
+    assert "66K" not in out
+    assert "HOH" not in out
+
+
+def test_missing_open_babel_names_the_install_command():
+    """A fallback that fails with a bare FileNotFoundError is worse than no
+    fallback — the reader cannot tell what to do about it."""
+    import shutil
+
+    real = shutil.which
+    shutil.which = lambda name: None if name == "obabel" else real(name)
+    try:
+        with pytest.raises(ReceptorPrepError) as exc:
+            OpenBabelReceptorPreparer().to_pdbqt("ATOM      1  N   THR A 315\n")
+        assert "brew install open-babel" in str(exc.value)
+    finally:
+        shutil.which = real
+
+
+# --- Reproducibility of structure preparation ---------------------------------
+#
+# Vina is invoked with cpu=1 and a fixed seed, so it is deterministic given
+# identical input files. Docking deltas nonetheless failed to reproduce at a
+# fixed seed (~0.4 kcal/mol spread, the same order as the effects being
+# measured). The variation came from structure preparation, upstream of Vina:
+# PDBFixer's addMissingAtoms minimization, OpenMM Modeller's random hydrogen
+# placement, and multi-threaded force summation on the CPU platform.
+
+from secondlook.vina_dock import deterministic_cpu_platform  # noqa: E402
+
+
+def test_deterministic_cpu_platform_pins_single_thread():
+    platform = deterministic_cpu_platform()
+    if platform is None:
+        pytest.skip("openmm is not installed")
+    assert platform.getPropertyDefaultValue("Threads") == "1"
+
+
+def test_pdbfixer_complete_restores_the_global_rng_state():
+    """Seeding is required for reproducible hydrogen placement, but the process-wide
+    RNG must be left as it was found -- callers do not expect a structure-prep call
+    to reset their random stream."""
+    import random
+
+    pytest.importorskip("pdbfixer")
+    from secondlook.vina_dock import _pdbfixer_complete
+
+    random.seed(12345)
+    before = random.random()
+    random.seed(12345)
+    try:
+        _pdbfixer_complete(SINGLE_RESIDUE_PDB, None, None)
+    except ReceptorPrepError:
+        pytest.skip("pdbfixer could not complete the minimal test structure")
+    assert random.random() == before
+
+
+SINGLE_RESIDUE_PDB = """\
+ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 20.00           N
+ATOM      2  CA  ALA A   1       1.458   0.000   0.000  1.00 20.00           C
+ATOM      3  C   ALA A   1       2.009   1.420   0.000  1.00 20.00           C
+ATOM      4  O   ALA A   1       1.251   2.390   0.000  1.00 20.00           O
+ATOM      5  CB  ALA A   1       1.988  -0.773  -1.199  1.00 20.00           C
+END
+"""
+
+
+@pytest.mark.integration
+def test_structure_preparation_is_byte_identical_across_runs():
+    """The regression test for the fixed-seed reproducibility bug.
+
+    Marked integration because it runs PDBFixer and OpenMM on a real structure,
+    which takes minutes. Requires 5HU9 in the local PDB cache.
+    """
+    from pathlib import Path
+
+    pytest.importorskip("pdbfixer")
+    pdb_path = Path("/tmp/athena-pdb-cache/5HU9.pdb")
+    if not pdb_path.exists():
+        pytest.skip("5HU9 not cached; run validation/verify_proximity.py first")
+
+    from secondlook.vina_dock import (
+        PdbFixerMutantBuilder,
+        PdbFixerProtonator,
+        extract_chain,
+        select_docking_chain,
+    )
+
+    text = pdb_path.read_text()
+    chain = select_docking_chain(text, 315)
+    protein = protein_atoms_only(extract_chain(text, chain))
+
+    protonator = PdbFixerProtonator()
+    assert protonator.protonate(protein) == protonator.protonate(protein)
+
+    builder = PdbFixerMutantBuilder()
+    first = builder.place_sidechain(protein, "T315I", 315)
+    second = builder.place_sidechain(protein, "T315I", 315)
+    assert first == second
+
+
+# --- protomer selection for docking ------------------------------------------
+#
+# ISSUES.md #18. `measure_proximity` was fixed to report the closest approach
+# across protomers; the docking path was not, and still picked a chain by ligand
+# size. On 8C7X that chose BRAF V600's far copy (12.2 A) over its near one
+# (7.2 A), so the case was refused as "outside the 8 A contact range" while the
+# proximity signal in the SAME result object reported 7.2 A.
+
+TWO_PROTOMER_PDB = """\
+ATOM      1  CA  VAL A 600      20.000   0.000   0.000  1.00 20.00           C
+HETATM    2  C1  LIG A 700       0.000   0.000   0.000  1.00 20.00           C
+HETATM    3  C2  LIG A 700       1.000   0.000   0.000  1.00 20.00           C
+HETATM    4  C3  LIG A 700       2.000   0.000   0.000  1.00 20.00           C
+ATOM      5  CA  VAL B 600       3.000   0.000   0.000  1.00 20.00           C
+HETATM    6  C1  LIG B 700       0.000   0.000   0.000  1.00 20.00           C
+HETATM    7  C2  LIG B 700       1.000   0.000   0.000  1.00 20.00           C
+END
+"""
+
+
+def test_docking_chain_is_the_protomer_where_the_mutation_is_closest():
+    """Chain A holds the bigger ligand but the residue is 18 A away; chain B's
+    residue is 1 A from its ligand. The near copy must win, or the contact gate
+    refuses a case it should have scored."""
+    from secondlook.vina_dock import select_docking_chain
+
+    assert select_docking_chain(TWO_PROTOMER_PDB, 600) == "B"
+
+
+def test_min_residue_ligand_distance_takes_the_closest_protomer():
+    from secondlook.vina_dock import min_residue_ligand_distance
+
+    # chain B: residue at x=3.0, nearest chain-B ligand atom at x=1.0
+    assert min_residue_ligand_distance(TWO_PROTOMER_PDB, 600) == pytest.approx(2.0)
+
+
+def test_ligand_size_still_breaks_ties():
+    """The original rule — prefer the biggest HET group, so a buffer component
+    does not win — must survive when the distances are equal."""
+    from secondlook.vina_dock import select_docking_chain
+
+    tied = """\
+ATOM      1  CA  VAL A 600       3.000   0.000   0.000  1.00 20.00           C
+HETATM    2  C1  LIG A 700       0.000   0.000   0.000  1.00 20.00           C
+HETATM    3  C2  LIG A 700      50.000   0.000   0.000  1.00 20.00           C
+HETATM    4  C3  LIG A 700      51.000   0.000   0.000  1.00 20.00           C
+ATOM      5  CA  VAL B 600       3.000   0.000   0.000  1.00 20.00           C
+HETATM    6  C1  LIG B 700       0.000   0.000   0.000  1.00 20.00           C
+END
+"""
+    assert select_docking_chain(tied, 600) == "A"
+
+
+def test_docking_gate_and_proximity_cannot_disagree():
+    """The invariant the bug violated: the distance the contact gate uses must be
+    the distance the proximity signal reports."""
+    from secondlook.proximity import build_proximity_signal
+    from secondlook.vina_dock import (
+        extract_chain,
+        min_residue_ligand_distance,
+        residue_min_distance_to_ligand,
+        select_docking_chain,
+    )
+
+    chain = select_docking_chain(TWO_PROTOMER_PDB, 600)
+    gate_distance = residue_min_distance_to_ligand(extract_chain(TWO_PROTOMER_PDB, chain), 600)
+    across_protomers = min_residue_ligand_distance(TWO_PROTOMER_PDB, 600)
+    assert gate_distance == pytest.approx(across_protomers)
+
+    signal = build_proximity_signal(
+        across_protomers,
+        structure_id="TEST",
+        structure_source="PDB",
+        protomer_distances={"A": 18.0, "B": 2.0},
+    )
+    assert signal.distance_angstrom == pytest.approx(gate_distance)

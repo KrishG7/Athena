@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
 import re
 import subprocess
 import sys
@@ -16,7 +17,19 @@ from typing import Protocol
 
 from secondlook.binding import BindingScore, McsmPageError, chain_for_residue
 
-DEFAULT_TIMEOUT_SECONDS = 120.0
+#: Per docking run, not per candidate -- a wild-type/mutant pair costs two of
+#: these. 120s was the original value and was never measured against
+#: DEFAULT_EXHAUSTIVENESS: a single run on 5HU9 chain A at exhaustiveness 32
+#: takes roughly 200-375s on an idle machine and well over 480s under load, so
+#: every docking attempt was timing out. The failure was invisible because the
+#: timeout was swallowed and reported as "docking was unavailable or
+#: inapplicable" -- a resource limit presented as a scientific refusal. See
+#: ISSUES.md #17.
+#:
+#: 900s is a runaway guard with 3-4x margin over the measured cost, not a budget.
+#: If `reason_code="docking_timeout"` starts appearing in results, raise this
+#: before concluding anything about the chemistry.
+DEFAULT_TIMEOUT_SECONDS = 900.0
 DEFAULT_SEED = 1
 #: Vina's documentation recommends >=32 for consistent scores between runs; the
 #: default of 8 trades reproducibility for speed. Since the quantity we read is a
@@ -216,6 +229,28 @@ def chains_with_ligand(pdb_text: str) -> dict[str, int]:
     return best
 
 
+def min_residue_ligand_distance(pdb_text: str, position: int) -> float | None:
+    """Closest approach between the residue and a ligand, across every protomer.
+
+    A homodimer's copies can differ by several Angstrom (8C7X: 12.2 A in chain A,
+    7.2 A in chain B). Measuring on the whole file conflates them; measuring in
+    one arbitrary chain can report the copy where the mutation sits furthest from
+    the drug. Taking the minimum over chains that hold both the residue and a
+    ligand answers both — and is the same rule `measure_proximity` uses, so the
+    docking gate and the proximity signal cannot disagree.
+    """
+    candidates = sorted(
+        set(chains_with_residue(pdb_text, position)) & set(chains_with_ligand(pdb_text))
+    )
+    distances = [
+        d
+        for chain in candidates
+        if (d := residue_min_distance_to_ligand(extract_chain(pdb_text, chain), position))
+        is not None
+    ]
+    return min(distances) if distances else residue_min_distance_to_ligand(pdb_text, position)
+
+
 def select_docking_chain(pdb_text: str, position: int) -> str:
     """Pick the chain to dock against: it must hold the residue *and* a ligand.
 
@@ -247,9 +282,28 @@ def select_docking_chain(pdb_text: str, position: int) -> str:
             f"(residue in {sorted(residue_chains)}, ligand in {sorted(ligand_chains) or 'none'}); "
             "cannot place a grid box on a pocket this mutation could affect"
         )
-    # Largest ligand wins — the biggest non-trivial HET group is the likeliest
-    # real drug-binding site rather than a buffer component that escaped _SKIP_HET.
-    return max(usable, key=lambda chain: ligand_chains[chain])
+    # Among the chains that qualify, dock in the protomer where the mutated
+    # residue is CLOSEST to that chain's ligand.
+    #
+    # Selecting on ligand size alone picked an arbitrary protomer on homodimers,
+    # and the copies do not always agree. On 8C7X, BRAF V600 sits 12.2 A from the
+    # ligand in chain A and 7.2 A in chain B. Chain A loses to the 8 A contact
+    # gate, so the case was refused as "outside pocket" — while the proximity
+    # signal on the same result reported 7.2 A, having already been fixed to take
+    # the closest approach (ISSUES.md #13). One result object carried both
+    # numbers, contradicting itself, and a case that should have been docked was
+    # not. See ISSUES.md #18.
+    #
+    # Closest approach is also the right question on its own terms: it is the
+    # protomer where the mutation can actually influence binding, which is what
+    # docking is being asked about. Ligand size stays as the tie-break so the
+    # original buffer-component reasoning still applies when distances tie or
+    # cannot be measured.
+    def _rank(chain: str) -> tuple[float, int]:
+        distance = residue_min_distance_to_ligand(extract_chain(pdb_text, chain), position)
+        return (distance if distance is not None else float("inf"), -ligand_chains[chain])
+
+    return min(usable, key=_rank)
 
 
 def extract_chain(pdb_text: str, chain: str) -> str:
@@ -517,6 +571,46 @@ def resolve_overvalence(pdb_text: str) -> str:
     return "\n".join(kept) + "\n"
 
 
+def prepare_receptor_pair(
+    preparer: ReceptorPreparer, wildtype_pdb: str, mutant_pdb: str
+) -> tuple[str, str]:
+    """Prepare both receptors with one preparer, or both with the fallback.
+
+    The mutant is prepared first, deliberately. It is the one that fails — a
+    PDBFixer-built side chain is what meeko's residue templates reject — so
+    trying it first means a fallback decision is made before any work is wasted,
+    and both receptors are guaranteed to travel the same path.
+
+    Preparing them independently is the bug this exists to prevent: the
+    wild-type would succeed under meeko, the mutant would fall back to Open
+    Babel, and the resulting delta would fold a preparer difference into a
+    number reported as a mutation effect.
+    """
+    if not isinstance(preparer, FallbackReceptorPreparer):
+        # A caller-supplied preparer is used as given for both; it is not this
+        # function's business to second-guess an explicit injection.
+        return preparer.to_pdbqt(wildtype_pdb), preparer.to_pdbqt(mutant_pdb)
+
+    try:
+        mutant_pdbqt = preparer.primary.to_pdbqt(mutant_pdb)
+    except ReceptorPrepError:
+        # Mutant needs the fallback, so the wild-type takes it too.
+        return (
+            preparer.fallback.to_pdbqt(wildtype_pdb),
+            preparer.fallback.to_pdbqt(mutant_pdb),
+        )
+
+    try:
+        wildtype_pdbqt = preparer.primary.to_pdbqt(wildtype_pdb)
+    except ReceptorPrepError:
+        # Rarer, but the same rule applies in reverse.
+        return (
+            preparer.fallback.to_pdbqt(wildtype_pdb),
+            preparer.fallback.to_pdbqt(mutant_pdb),
+        )
+    return wildtype_pdbqt, mutant_pdbqt
+
+
 class MeekoReceptorPreparer:
     def to_pdbqt(self, pdb_text: str) -> str:
         pdb_text = resolve_overvalence(strip_terminal_oxt(pdb_text))
@@ -535,6 +629,150 @@ class MeekoReceptorPreparer:
         if not rigid.strip():
             raise ReceptorPrepError("meeko produced an empty receptor PDBQT")
         return rigid
+
+
+class OpenBabelReceptorPreparer:
+    """Receptor PDBQT via Open Babel, for the structures meeko refuses.
+
+    Exists because meeko's `update_H_positions` rejects PDBFixer's mutated
+    residues. It deletes the hydrogens that need repositioning, re-adds them
+    with `Chem.AddHs`, matches old to new by parent atom, and raises when the
+    counts differ::
+
+        meeko receptor prep failed: Updated 1 H positions but deleted 4
+
+    A THR->ILE swap changes the hydrogen topology at that residue (THR carries a
+    hydroxyl hydrogen, ILE does not), so the match comes up short. The
+    *wild-type* of the identical structure prepares cleanly, which is what makes
+    it a receptor-prep bug rather than a problem with the coordinates. Confirmed
+    not to be an RDKit sanitisation failure, not fixable by re-protonating, and
+    not fixable by supplying heavy atoms only. Present in meeko 0.7.1, the
+    latest release.
+
+    Open Babel does not use residue templates, so it is unaffected. It is the
+    fallback rather than the default because meeko's AutoDock atom typing is the
+    reference implementation Vina was parameterised against; Open Babel's is a
+    reimplementation. Preferring it everywhere would trade a known-good typing
+    for a merely adequate one on every structure, to fix a minority.
+
+    Do NOT reach for meeko's `--delete_residues` escape hatch instead: it drops
+    the residues it cannot template, which here is the mutated residue itself —
+    the entire measurement.
+    """
+
+    #: Waters and common crystallisation additives. A receptor carrying these
+    #: hands Vina occupied space to dock into.
+    _DISCARD_HET = frozenset(
+        {"HOH", "WAT", "DOD", "EDO", "GOL", "PEG", "DMS", "SO4", "PO4", "ACT",
+         "TRS", "MPD", "FMT", "ACY", "NO3", "IMD", "BME"}
+    )
+
+    def __init__(self, timeout_seconds: float = 300.0) -> None:
+        self._timeout = timeout_seconds
+
+    @staticmethod
+    def _protein_only(pdb_text: str, discard: frozenset[str]) -> str:
+        """Strip every HETATM, keeping the polymer.
+
+        The ligand is docked separately; leaving the crystallised copy in the
+        receptor means docking into an already-occupied pocket, which scores the
+        wrong thing rather than failing loudly.
+        """
+        kept = [
+            line
+            for line in pdb_text.splitlines()
+            if not (line.startswith("HETATM") and len(line) >= 20)
+        ]
+        return "\n".join(kept) + "\n"
+
+    def to_pdbqt(self, pdb_text: str) -> str:
+        import shutil
+        import subprocess
+        import tempfile
+
+        if shutil.which("obabel") is None:
+            raise ReceptorPrepError(
+                "Open Babel (obabel) is not installed; it is the fallback receptor "
+                "preparer for structures meeko cannot template. Install with "
+                "`brew install open-babel` or `conda install -c conda-forge openbabel`."
+            )
+
+        prepared = self._protein_only(
+            resolve_overvalence(strip_terminal_oxt(pdb_text)), self._DISCARD_HET
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "receptor.pdb"
+            dst = Path(tmp) / "receptor.pdbqt"
+            src.write_text(prepared)
+            try:
+                result = subprocess.run(
+                    # -xr: rigid receptor, no torsion tree.
+                    # gasteiger: the charge model AutoDock expects.
+                    ["obabel", "-ipdb", str(src), "-opdbqt", "-O", str(dst),
+                     "-xr", "--partialcharge", "gasteiger"],
+                    capture_output=True, text=True, timeout=self._timeout,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ReceptorPrepError(
+                    f"Open Babel receptor prep timed out after {self._timeout}s"
+                ) from exc
+            except OSError as exc:
+                raise ReceptorPrepError(f"Open Babel could not be run: {exc}") from exc
+
+            if result.returncode != 0 or not dst.exists():
+                tail = (result.stderr or "").strip().splitlines()[-3:]
+                raise ReceptorPrepError(
+                    f"Open Babel receptor prep failed (exit {result.returncode}): "
+                    + " | ".join(tail)
+                )
+            pdbqt = dst.read_text()
+
+        if not pdbqt.strip():
+            raise ReceptorPrepError("Open Babel produced an empty receptor PDBQT")
+        if not any(line.startswith(("ATOM", "HETATM")) for line in pdbqt.splitlines()):
+            raise ReceptorPrepError(
+                "Open Babel produced a receptor PDBQT with no atom records"
+            )
+        return pdbqt
+
+
+class FallbackReceptorPreparer:
+    """meeko first, Open Babel when meeko refuses the structure.
+
+    Ordered, not raced: meeko's typing is the reference and wins whenever it
+    works. The fallback is reached only on `ReceptorPrepError`, so a genuine
+    problem with the coordinates still surfaces — both preparers failing raises
+    with both messages, rather than hiding the first behind the second.
+
+    `used_fallback` records which path produced the last receptor, so a caller
+    can report that a structure needed the secondary preparer instead of
+    silently presenting the two as equivalent.
+    """
+
+    def __init__(
+        self,
+        primary: ReceptorPreparer | None = None,
+        fallback: ReceptorPreparer | None = None,
+    ) -> None:
+        self.primary = primary or MeekoReceptorPreparer()
+        self.fallback = fallback or OpenBabelReceptorPreparer()
+        self.used_fallback = False
+
+    def to_pdbqt(self, pdb_text: str) -> str:
+        try:
+            pdbqt = self.primary.to_pdbqt(pdb_text)
+        except ReceptorPrepError as primary_exc:
+            try:
+                pdbqt = self.fallback.to_pdbqt(pdb_text)
+            except ReceptorPrepError as fallback_exc:
+                raise ReceptorPrepError(
+                    f"both receptor preparers failed — primary: {primary_exc}; "
+                    f"fallback: {fallback_exc}"
+                ) from fallback_exc
+            self.used_fallback = True
+            return pdbqt
+        self.used_fallback = False
+        return pdbqt
 
 
 class MeekoLigandPreparer:
@@ -672,7 +910,7 @@ class VinaDockClient:
         exhaustiveness: int = DEFAULT_EXHAUSTIVENESS,
     ) -> None:
         defaults = receptor_preparer is None
-        self._receptor_preparer = receptor_preparer or MeekoReceptorPreparer()
+        self._receptor_preparer = receptor_preparer or FallbackReceptorPreparer()
         self._mutant_builder = mutant_builder or PdbFixerMutantBuilder()
         self._ligand_preparer = ligand_preparer or MeekoLigandPreparer()
         self._dock_engine = dock_engine or VinaEngine(exhaustiveness=exhaustiveness)
@@ -733,8 +971,16 @@ class VinaDockClient:
                 f"beyond the {MUTATION_CONTACT_MAX_ANGSTROM:.0f} A docking contact range"
             )
 
-        wildtype_pdbqt = self._receptor_preparer.to_pdbqt(wildtype_pdb)
-        mutant_pdbqt = self._receptor_preparer.to_pdbqt(mutant_pdb)
+        # Both receptors MUST come from the same preparer. meeko and Open Babel
+        # assign different AutoDock atom types and different partial charges, so
+        # a wild-type typed by one and a mutant typed by the other would produce
+        # a delta contaminated by the preparer difference — and the contamination
+        # is the same order as the signal being measured (0.02-0.56 kcal/mol).
+        # `prepare_receptor_pair` enforces this by falling back for BOTH as soon
+        # as either one needs it.
+        wildtype_pdbqt, mutant_pdbqt = prepare_receptor_pair(
+            self._receptor_preparer, wildtype_pdb, mutant_pdb
+        )
         ligand_pdbqt = self._ligand_preparer.to_pdbqt(smiles)
         wildtype_score = self._dock_engine.dock(
             wildtype_pdbqt, ligand_pdbqt, box, self.timeout_seconds, self.seed
@@ -750,6 +996,8 @@ class VinaDockClient:
             distance_angstrom=residue_min_distance_to_ligand(single_chain, position),
             ligand_id=None,
             chain=chain,
+            wildtype_score=wildtype_score,
+            mutant_score=mutant_score,
         )
 
 
@@ -832,9 +1080,13 @@ def minimize_mutated_sidechain(
         integrator = openmm.LangevinIntegrator(
             300 * unit.kelvin, 1 / unit.picosecond, 0.002 * unit.picoseconds
         )
+        # Seeded and single-threaded for the same reason as _pdbfixer_complete:
+        # this minimization output becomes the mutant receptor, so any run-to-run
+        # drift here lands directly in the delta.
+        integrator.setRandomNumberSeed(DEFAULT_SEED)
+        platform = deterministic_cpu_platform() or openmm.Platform.getPlatformByName("CPU")
         simulation = app.Simulation(
-            structure.topology, system, integrator,
-            openmm.Platform.getPlatformByName("CPU"),
+            structure.topology, system, integrator, platform,
         )
         simulation.context.setPositions(structure.positions)
         simulation.minimizeEnergy(maxIterations=max_iterations)
@@ -849,13 +1101,53 @@ def minimize_mutated_sidechain(
         return pdb_text
 
 
+def deterministic_cpu_platform():
+    """OpenMM's CPU platform, pinned to a single thread.
+
+    The CPU platform sums forces across threads in whatever order they finish.
+    Floating-point addition is not associative, so a multi-threaded energy
+    minimization takes a slightly different path on every run and lands on
+    slightly different coordinates. Those coordinates go on to become the
+    docking receptor, so the difference reaches the score.
+
+    Returns None when OpenMM is unavailable, so callers can fall back to the
+    library default rather than fail.
+    """
+    try:
+        import openmm
+    except ImportError:
+        return None
+    platform = openmm.Platform.getPlatformByName("CPU")
+    platform.setPropertyDefaultValue("Threads", "1")
+    return platform
+
+
 def _pdbfixer_complete(pdb_text: str, mutations: list[str] | None, chain: str | None) -> str:
+    """Complete a structure with PDBFixer, reproducibly.
+
+    Three separate sources of randomness have to be pinned or the same input
+    yields different coordinates on every call:
+
+    1. `addMissingAtoms` minimizes newly-placed heavy atoms with a Langevin
+       integrator seeded from OS entropy unless `seed` is passed.
+    2. `addMissingHydrogens` (via OpenMM's Modeller) places every added hydrogen
+       at a `random.random()` offset and then minimizes, so it consumes the
+       process-wide Python RNG.
+    3. Both minimizations run on OpenMM's multi-threaded CPU platform.
+
+    Measured on 5HU9 chain A, leaving these unpinned moved heavy atoms by up to
+    ~0.07 A between runs and shifted docking scores by ~0.4 kcal/mol -- the same
+    order as the mutation effects this pipeline exists to measure.
+    """
     try:
         from openmm.app import PDBFile
         from pdbfixer import PDBFixer
     except ImportError as exc:
         raise ReceptorPrepError("pdbfixer/openmm is not installed") from exc
     fixer = PDBFixer(pdbfile=StringIO(pdb_text))
+    platform = deterministic_cpu_platform()
+    if platform is not None:
+        fixer.platform = platform
     if mutations and chain is not None:
         fixer.applyMutations(mutations, chain)
     fixer.findMissingResidues()
@@ -863,8 +1155,16 @@ def _pdbfixer_complete(pdb_text: str, mutations: list[str] | None, chain: str | 
     fixer.findNonstandardResidues()
     fixer.replaceNonstandardResidues()
     fixer.findMissingAtoms()
-    fixer.addMissingAtoms()
-    fixer.addMissingHydrogens(PHYSIOLOGICAL_PH)
+    fixer.addMissingAtoms(seed=DEFAULT_SEED)
+    # Save and restore the RNG state: seeding is needed for reproducible
+    # hydrogen placement, but silently resetting the process-wide RNG would be a
+    # surprising side effect for any caller that also uses `random`.
+    rng_state = random.getstate()
+    try:
+        random.seed(DEFAULT_SEED)
+        fixer.addMissingHydrogens(PHYSIOLOGICAL_PH)
+    finally:
+        random.setstate(rng_state)
     out = StringIO()
     PDBFile.writeFile(fixer.topology, fixer.positions, out, keepIds=True)
     return out.getvalue()

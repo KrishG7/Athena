@@ -33,7 +33,7 @@ mechanism is geometrically available, and nothing further.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 ProximityBand = Literal["in_contact", "pocket_adjacent", "distant", "unknown"]
@@ -106,6 +106,41 @@ class ProximitySignal:
     #: has no co-crystallized ligand, so proximity is not measurable from one —
     #: this is always True when `band` is not "unknown".
     from_experimental_structure: bool
+    #: Distance measured in each protein chain that holds BOTH the mutated
+    #: residue and a copy of the ligand, keyed by chain id.
+    #:
+    #: Many crystal structures contain several copies of the same protein, and
+    #: those copies are not always in the same conformation. BRAF 8C7X is the
+    #: case that forced this field: residue 600 sits 12.25 A from ligand TXV in
+    #: chain A and 7.21 A from it in chain B — a 5 A spread across two
+    #: chemically identical protomers, straddling the pocket_adjacent/distant
+    #: boundary. Reporting whichever chain happened to be selected made the
+    #: answer depend on an arbitrary choice, and said nothing about the spread.
+    #:
+    #: `distance_angstrom` is the MINIMUM of these — the closest approach across
+    #: protomers. That is the conservative reading for the question actually
+    #: being asked ("could a substitution here reach the pocket?"): if any copy
+    #: of the protein shows contact, contact is geometrically possible.
+    protomer_distances: dict[str, float] = field(default_factory=dict)
+
+    @property
+    def protomers_disagree(self) -> bool:
+        """True when protomers differ enough to land in different bands.
+
+        Not a numeric threshold — the bands are the thing that changes what gets
+        reported, so disagreement is defined by them.
+        """
+        if len(self.protomer_distances) < 2:
+            return False
+        bands = {classify_proximity(d) for d in self.protomer_distances.values()}
+        return len(bands) > 1
+
+    @property
+    def distance_range_angstrom(self) -> tuple[float, float] | None:
+        if not self.protomer_distances:
+            return None
+        vals = list(self.protomer_distances.values())
+        return (min(vals), max(vals))
 
     @property
     def contact_mechanism_available(self) -> bool:
@@ -128,13 +163,30 @@ def describe_proximity(
     band: ProximityBand,
     distance_angstrom: float | None,
     ligand: str | None = None,
+    protomer_distances: dict[str, float] | None = None,
 ) -> str:
-    return _BAND_DESCRIPTIONS[band].format(
+    text = _BAND_DESCRIPTIONS[band].format(
         contact=CONTACT_ANGSTROM,
         adjacent=POCKET_ADJACENT_ANGSTROM,
         distance=distance_angstrom if distance_angstrom is not None else float("nan"),
         ligand=ligand or "unidentified",
     )
+    # A structure whose protomers land in different bands is reporting a real
+    # conformational difference, not noise. Saying only the closest number would
+    # hide the very thing a reader needs in order to judge how firm the band is.
+    if protomer_distances and len(protomer_distances) > 1:
+        bands = {classify_proximity(d) for d in protomer_distances.values()}
+        if len(bands) > 1:
+            detail = ", ".join(
+                f"chain {c} {d:.1f} A" for c, d in sorted(protomer_distances.items())
+            )
+            text += (
+                f" This structure holds {len(protomer_distances)} copies of the protein and "
+                f"they do not agree ({detail}); the closest approach is reported, and the "
+                "band should be treated as the most permissive reading rather than a "
+                "settled fact."
+            )
+    return text
 
 
 def build_proximity_signal(
@@ -144,7 +196,14 @@ def build_proximity_signal(
     structure_source: str | None,
     measured_to_ligand: str | None = None,
     candidate_drug_het_code: str | None = None,
+    protomer_distances: dict[str, float] | None = None,
 ) -> ProximitySignal:
+    protomer_distances = dict(protomer_distances or {})
+    # The reported distance is the closest approach across protomers. When a
+    # caller supplies per-chain measurements, they win over a single passed-in
+    # value — a single value cannot represent a multimer.
+    if protomer_distances:
+        distance_angstrom = min(protomer_distances.values())
     band = classify_proximity(distance_angstrom)
     is_candidate = bool(
         measured_to_ligand
@@ -154,10 +213,13 @@ def build_proximity_signal(
     return ProximitySignal(
         band=band,
         distance_angstrom=distance_angstrom,
-        description=describe_proximity(band, distance_angstrom, measured_to_ligand),
+        description=describe_proximity(
+            band, distance_angstrom, measured_to_ligand, protomer_distances
+        ),
         structure_id=structure_id,
         structure_source=structure_source,
         measured_to_ligand=measured_to_ligand,
         ligand_is_candidate_drug=is_candidate,
         from_experimental_structure=band != "unknown",
+        protomer_distances=protomer_distances,
     )

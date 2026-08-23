@@ -66,7 +66,7 @@ Mutation-to-ligand distance, measured on the structures the pipeline itself sele
 |---|---|---|
 | EGFR T790M | **3.5 A** | largest observed, correct direction |
 | EGFR C797S | 10.1 A | ~ -0.02 |
-| BRAF V600E | 12.2 A | ~ +0.05 |
+| BRAF V600E | 7.2 A (chain B; 12.2 A chain A) | ~ +0.05 |
 | KIT D816V | 16.6 A | not scoreable |
 
 Only T790M sits within direct-contact range, and it is the only case whose delta rises above noise. Everything past ~10 A collapses to |delta| < 0.06 regardless of the known clinical direction.

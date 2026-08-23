@@ -27,11 +27,19 @@ git clone https://github.com/KrishG7/Athena.git
 cd Athena
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest                                    # 538 tests, ~10s, fully offline
+bash validation/check_everything.sh       # every offline check, ~40s
 ```
 
-If that prints `538 passed`, the project is working. Everything below is for
-running the parts that need live services.
+That one command runs everything that can be checked without live services and
+prints a pass/fail line for each. If it ends with `All checks that ran passed`,
+the project is working. Everything below is detail — read it when something
+fails, or when you need the parts that need live services.
+
+Add `--live` to also run the integration tests (needs FalkorDB and network):
+
+```bash
+bash validation/check_everything.sh --live
+```
 
 ---
 
@@ -132,18 +140,86 @@ Integration tests hit live services and a running FalkorDB. They're
 down.
 
 ```bash
-pytest                       # 538 unit tests, offline    -> expect "538 passed"
-pytest -m integration        # live services + FalkorDB   -> expect ~33 passed
+bash validation/check_everything.sh   # all offline checks, with a summary
+bash validation/check_everything.sh --live   # + integration tests
+
+# or run the pieces directly:
+pytest                       # unit tests, offline        -> expect "605 passed"
+pytest -m integration        # live services + FalkorDB   -> 50 collected; how many
+                             #   pass depends on FalkorDB being up and the live APIs
 pytest tests/tier1           # Tier 1 only
 pytest tests/test_pipeline.py -v
 ```
 
-**Expected: 538 passing, 0 failures.** Anything else is a regression — do not
+**Expected: 605 passing, 0 failures.** Anything else is a regression — do not
 demo until it's green.
+
+### Checking a change in seconds instead of hours
+
+A full gold-standard run costs ~2 hours, nearly all of it Vina search. Most
+questions about *why* a case did or did not produce a delta are settled before
+docking starts — the covalent gate, which structure and protomer were chosen,
+and whether the mutation is inside the 8 A contact range. Those are arithmetic
+on coordinates:
+
+```bash
+python validation/triage.py            # seconds, uses cached structures
+python validation/triage.py --fetch    # download any PDB not cached yet
+```
+
+It prints, per case, the gate it hits and the outcome that implies — including
+per-protomer distances, so a homodimer whose copies disagree is visible at a
+glance (that disagreement was a real bug; see [`ISSUES.md`](ISSUES.md) §18).
+
+Use it for the fast loop. Use `run_gold_standard.py` when you need the number.
+
+### What `check_everything.sh` checks that plain `pytest` does not
+
+- **Import resolution.** `secondlook` is a namespace package, so if another
+  checkout of this project is on your `sys.path` (an editable install pointing
+  at an older clone), modules can silently resolve to *that* copy. The script
+  confirms the code under test is this repo's.
+- **Self-containment.** It re-runs the suite with sibling checkouts removed from
+  `sys.path`. Without this, a module missing from this repo could import from a
+  sibling clone and the suite would pass on code a fresh clone does not have.
+- **The pre-registered proximity criteria (C1-C4).** Independent re-derivation
+  of every reported distance straight from PDB coordinates. See
+  `docs/proximity-validation-plan.md`; the criteria were fixed before any result
+  was seen and must not be adjusted afterwards.
 
 ---
 
 ## 5. Use the pipeline
+
+### The easy way — `ask.py`
+
+One command asks Tier 1 first and falls through to Tier 2 only if Tier 1 has
+nothing strong. This is the flow the product is: **documented evidence beats a
+structural prediction**, so Tier 2 exists for the cases Tier 1 cannot answer.
+
+```bash
+python ask.py ABL1 T315I --drug imatinib
+python ask.py ABL1 T315I --drug imatinib --cancer-type "chronic myeloid leukemia"
+python ask.py BRAF V600E --drug vemurafenib --tier2-anyway   # force Tier 2
+python ask.py EGFR T790M --drug osimertinib --skip-tier1     # no FalkorDB needed
+```
+
+What it does:
+
+1. Queries Tier 1. `strong_hit` (Level A/B evidence) → prints the citations and
+   **stops**; Tier 2 is not run.
+2. `weak_hit` or `no_hit` → hands over to Tier 2, restricted to `--drug`.
+3. Prints the Tier 2 result as either a `binding_delta` (label + delta) or a
+   `proximity_only` (pocket distance, and the reason no delta was computed).
+
+`--drug` is repeatable; omit it to score every candidate drug found for the
+gene. Tier 1 needs `docker compose up -d`; Tier 2 hits live services and takes
+minutes per drug.
+
+> `ask.py` chooses the Tier 1 match key from the mutation's shape — shorthand
+> like `T315I` is CIViC's *variant name*, not its `hgvs_p`. Calling `run_tier2`
+> directly with an activation policy does **not** do this and will silently
+> report `no_hit`. See [`ISSUES.md`](ISSUES.md) §16.
 
 ### Tier 2 alone
 
@@ -296,7 +372,7 @@ src/secondlook/
 ├── validation.py        Gold-standard harness, pre-committed criteria
 └── tier1/               Tier 1 — CIViC loader, retrieval Modes 1-3, graph schema
 
-tests/                   538 unit tests (tests/tier1/ for Tier 1)
+tests/                   605 unit tests (tests/tier1/ for Tier 1)
 validation/              Gold-standard runner and results
 docs/                    Specs, setup guides, research notes
 ISSUES.md                Every known problem and its candidate fix
@@ -310,6 +386,8 @@ ISSUES.md                Every known problem and its candidate fix
 | [`docs/validation-plan.md`](docs/validation-plan.md) | Pre-committed pass/fail criteria |
 | [`docs/local-setup.md`](docs/local-setup.md) | macOS install hurdles |
 | [`docs/briefing/`](docs/briefing/) | Standalone explanation of the method and its limits |
+| [`docs/proximity-validation-plan.md`](docs/proximity-validation-plan.md) | Pre-registered criteria for the proximity claim, and the result |
+| [`docs/method-coverage-note.md`](docs/method-coverage-note.md) | Which scoring method actually contributed, and what that costs |
 
 ---
 

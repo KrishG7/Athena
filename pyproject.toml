@@ -44,7 +44,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# "." puts the repo root on the path so tests can import the ask.py CLI.
+pythonpath = ["src", "."]
 # Integration tests hit live external services (Ensembl VEP, RCSB, AlphaFold DB,
 # UniProt, CIViC, PubMed) and a running FalkorDB. Deselected by default so a
 # plain `pytest` is fast, offline and deterministic; run them explicitly with

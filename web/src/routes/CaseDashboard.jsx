@@ -24,6 +24,7 @@ export default function CaseDashboard() {
   if (changes.error) return <Failure what="change set" error={changes.error} />
 
   const c = kase.data
+  const alterations = c.current_state?.alterations ?? []
   return (
     <>
       <h1>{c.label}</h1>
@@ -75,7 +76,17 @@ export default function CaseDashboard() {
           </div>
         </div>
         <p className="small muted" style={{ margin: 0 }}>
-          Case alterations mapped: <code>EGFR L858R</code>, <code>EGFR T790M</code> · Evidence edges active: 46 items across CIViC, ChEMBL, and CDSCO.
+          Case alterations mapped:{' '}
+          {alterations.length === 0
+            ? 'none recorded'
+            : alterations.map((a, i) => (
+                <span key={`${a.gene}-${a.variant}-${i}`}>
+                  {i > 0 ? ', ' : null}
+                  <code>
+                    {a.gene} {a.variant}
+                  </code>
+                </span>
+              ))}
         </p>
       </div>
 

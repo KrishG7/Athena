@@ -33,7 +33,23 @@ async function get(route, fixture) {
 
 export const getCase = (id) => get(`/api/cases/${id}`, caseFixture)
 export const getChanges = (id) => get(`/api/cases/${id}/changes`, changesFixture)
-export const getQueue = (id) => get(`/api/cases/${id}/queue`, queueFixture)
+// The REST API returns { case_id, questions, question_counts, empty_reason } (QueueView in
+// secondlook/query/contracts.py); the screens read the fixture shape { counts, open,
+// suppressed, failures }. Accept both, so the live API no longer renders as "0 open".
+export function normalizeQueue(data) {
+  if (!data || !Array.isArray(data.questions)) return data
+  const withStatus = (status) => data.questions.filter((q) => q.status === status)
+  return {
+    case_id: data.case_id,
+    counts: data.question_counts ?? {},
+    open: withStatus('open'),
+    suppressed: withStatus('suppressed'),
+    failures: [],
+  }
+}
+
+export const getQueue = async (id) =>
+  normalizeQueue(await get(`/api/cases/${id}/queue`, queueFixture))
 
 // No fixture fallback: the timeline bundle is ~1.6MB of real reference data
 // (see src/secondlook/timeline/reference_data.py), not something to also

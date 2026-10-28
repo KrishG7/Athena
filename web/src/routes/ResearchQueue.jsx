@@ -121,7 +121,7 @@ function QueueBody({ id, counts, open, suppressed, failures, degradedLanes, byPr
             onKeyDown={(event) => onKeyDown(event, q)}
             {...itemProps(index)}
           >
-            <div className="q-priority">Priority {q.priority} · {String(q.kind).replace(/_/g, ' ')}</div>
+            <div className="q-priority">Priority {q.priority}{q.kind ? ` · ${String(q.kind).replace(/_/g, ' ')}` : ''}</div>
             <div>{q.text}</div>
             {q.triggered_by?.summary ? (
               <div className="small muted">Triggered by: {q.triggered_by.summary}</div>

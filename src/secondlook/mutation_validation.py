@@ -156,12 +156,13 @@ def validate_mutation(
     )
 
 
+# The 20 standard residues. `aa1_to_aa3` is not a safe check on its own: hgvs also maps
+# ambiguity and non-standard codes (B, Z, X, U, ...) so "Z" passes it as "Glx".
+_STANDARD_RESIDUES = frozenset("ACDEFGHIKLMNPQRSTVWY")
+
+
 def _is_valid_residue(code: str) -> bool:
-    try:
-        aa1_to_aa3(code)
-    except KeyError:
-        return False
-    return True
+    return code in _STANDARD_RESIDUES
 
 
 def _classify_from_notation(raw: str) -> MutationType | None:
